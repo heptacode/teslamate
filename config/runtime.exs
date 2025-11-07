@@ -120,32 +120,83 @@ config :teslamate, TeslaMate.Repo,
   timeout: System.get_env("DATABASE_TIMEOUT", "60000") |> String.to_integer(),
   database: Util.fetch_env!("DATABASE_NAME", dev: "teslamate_dev", test: "teslamate_test")
 
-case System.get_env("DATABASE_SSL") do
-  "true" ->
-    ca_cert_file =
-      System.get_env("DATABASE_SSL_CA_CERT_FILE") || raise "DATABASE_SSL_CA_CERT_FILE must be set"
+case System.get_env("DATABASE_SSL_MODE") do
+  nil ->
+    # Fallback to legacy DATABASE_SSL for backward compatibility
+    case System.get_env("DATABASE_SSL") do
+      "true" ->
+        ca_cert_file =
+          System.get_env("DATABASE_SSL_CA_CERT_FILE") ||
+            raise "DATABASE_SSL_CA_CERT_FILE must be set"
 
-    config :teslamate, TeslaMate.Repo,
-      ssl: true,
-      ssl_opts: [
-        verify: :verify_peer,
-        cacertfile: ca_cert_file
-      ]
+        config :teslamate, TeslaMate.Repo,
+          ssl: [
+            verify: :verify_peer,
+            cacertfile: ca_cert_file
+          ]
 
-  "noverify" ->
-    config :teslamate, TeslaMate.Repo,
-      ssl: true,
-      ssl_opts: [
-        server_name_indication:
-          to_charlist(
-            System.get_env("DATABASE_SSL_SNI") ||
-              Util.fetch_env!("DATABASE_HOST", all: "localhost")
-          ),
-        verify: :verify_none
-      ]
+      "noverify" ->
+        config :teslamate, TeslaMate.Repo,
+          ssl: [
+            server_name_indication:
+              to_charlist(
+                System.get_env("DATABASE_SSL_SNI") ||
+                  Util.fetch_env!("DATABASE_HOST", all: "localhost")
+              ),
+            verify: :verify_none
+          ]
 
-  _false ->
-    config :teslamate, TeslaMate.Repo, ssl: false
+      _false ->
+        config :teslamate, TeslaMate.Repo, ssl: false
+    end
+
+  sslmode ->
+    # Handle DATABASE_SSL_MODE environment variable
+    case sslmode do
+      mode when mode in ["disable", "allow", "prefer"] ->
+        # For these modes, SSL is optional or disabled
+        ssl_config = if mode == "disable", do: false, else: [verify: :verify_none]
+
+        config :teslamate, TeslaMate.Repo, ssl: ssl_config
+
+      mode when mode in ["require", "verify-ca", "verify-full"] ->
+        # For these modes, SSL is required with different verification levels
+        ssl_config =
+          case mode do
+            "require" ->
+              # SSL required but don't verify certificate
+              [verify: :verify_none]
+
+            "verify-ca" ->
+              # Verify CA certificate
+              ca_cert_file =
+                System.get_env("DATABASE_SSL_CA_CERT_FILE") ||
+                  raise "DATABASE_SSL_CA_CERT_FILE must be set for sslmode=#{mode}"
+
+              [verify: :verify_peer, cacertfile: ca_cert_file]
+
+            "verify-full" ->
+              # Verify CA and hostname
+              ca_cert_file =
+                System.get_env("DATABASE_SSL_CA_CERT_FILE") ||
+                  raise "DATABASE_SSL_CA_CERT_FILE must be set for sslmode=#{mode}"
+
+              [
+                verify: :verify_peer,
+                cacertfile: ca_cert_file,
+                server_name_indication:
+                  to_charlist(
+                    System.get_env("DATABASE_SSL_SNI") ||
+                      Util.fetch_env!("DATABASE_HOST", all: "localhost")
+                  )
+              ]
+          end
+
+        config :teslamate, TeslaMate.Repo, ssl: ssl_config
+
+      _ ->
+        raise "Invalid DATABASE_SSL_MODE: #{sslmode}. Valid values are: disable, allow, prefer, require, verify-ca, verify-full"
+    end
 end
 
 if System.get_env("DATABASE_IPV6") == "true" do
